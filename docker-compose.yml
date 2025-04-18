@@ -1,0 +1,53 @@
+version: "3.9"
+services:
+  bot:
+    build: .
+    container_name: vpn-telegram-bot
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./backups:/app/backups
+      - ./config:/app/config
+    depends_on:
+      - db
+    networks:
+      - botnet
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  db:
+    image: postgres:15-alpine
+    container_name: vpn-bot-db
+    restart: always
+    environment:
+      POSTGRES_DB: vpn
+      POSTGRES_USER: vpnuser
+      POSTGRES_PASSWORD: vpnpassword
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    networks:
+      - botnet
+
+  migrate:
+    image: golang:1.21-alpine
+    volumes:
+      - ./migrations:/migrations
+    depends_on:
+      - db
+    entrypoint: >
+      /bin/sh -c "go install github.com/pressly/goose/v3/cmd/goose@latest && goose -dir /migrations postgres \"$DATABASE_URL\" up"
+    environment:
+      - DATABASE_URL=postgres://vpnuser:vpnpassword@db:5432/vpn?sslmode=disable
+    networks:
+      - botnet
+
+volumes:
+  db_data:
+
+networks:
+  botnet:
+    driver: bridge
