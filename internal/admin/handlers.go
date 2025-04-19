@@ -123,7 +123,7 @@ func handlePayments(bot *tgbotapi.BotAPI, update *tgbotapi.Update) {
 	payments := db.GetPayments(from, to)
 	var sb strings.Builder
 	for _, p := range payments {
-		sb.WriteString(fmt.Sprintf("ID: %d, User: %v, Amount: %.2f, Status: %s\n", p.ID, p.UserID, p.Amount, p.Status))
+		sb.WriteString(fmt.Sprintf("ID: %d, User: %v, Amount: %d, Status: %s\n", p.ID, p.UserID, p.Amount, p.Status))
 	}
 	bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, sb.String()))
 }

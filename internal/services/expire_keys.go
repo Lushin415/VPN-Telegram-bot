@@ -4,7 +4,8 @@ import (
 	"VPN-Telegram-bot/internal/db"
 	"VPN-Telegram-bot/internal/logger"
 	"fmt"
-	"
+	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"time"
 )
 
 // DisableExpiredKeys отключает ключи с истёкшей подпиской и уведомляет пользователя
@@ -32,11 +33,10 @@ func RenewKeyAfterPayment(userID uint, keyID uint, months int) error {
 	now := time.Now().Unix()
 	reservedUntil := now + int64(months*30*24*60*60)
 	return db.DB.Model(&db.VLESSKey{}).Where("id = ? AND user_id IS NULL", keyID).Updates(map[string]interface{}{
-		"is_used": true,
-		"is_used":           true,
-		"user_id":           userID,
-		"assigned_at":       now,
-		"reserved_until":    reservedUntil,
+		"is_used":        true,
+		"user_id":        userID,
+		"assigned_at":    now,
+		"reserved_until": reservedUntil,
 	}).Error
 }
 

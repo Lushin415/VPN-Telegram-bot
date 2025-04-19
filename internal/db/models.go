@@ -38,4 +38,15 @@ type Payment struct {
 	Months     *int  // срок продления
 }
 
+// Order представляет заказ пользователя
+type Order struct {
+	ID        uint `gorm:"primaryKey"`
+	UserID    uint
+	Server    string
+	Tariff    string
+	PaymentID string
+	Status    string
+	CreatedAt int64
+}
+
 // Удалена структура Order (оставить только одну реализацию в db.go)

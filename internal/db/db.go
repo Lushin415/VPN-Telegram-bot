@@ -5,20 +5,11 @@ import (
 	"gorm.io/gorm"
 	"log"
 	"os"
-	
+
 	"time"
 )
 
 var DB *gorm.DB
-
-	UserID    uint `gorm:"primaryKey"`
-	UserID    uint   `gorm:"primaryKey"`
-	Server    string
-	Tariff    string
-	PaymentID string
-	Status    string
-	CreatedAt int64
-}
 
 func InitDB() {
 	dsn := os.Getenv("DATABASE_URL")
@@ -30,7 +21,7 @@ func InitDB() {
 		log.Fatalf("failed to connect database: %v", err)
 	}
 	DB = db
-	db.AutoMigrate(&User{}, &Server{}, &VLESSKey{}, &Payment{}, &Order{})
+	db.AutoMigrate(&Server{}, &VLESSKey{}, &Payment{}, &Order{})
 }
 
 // CreateOrder сохраняет заказ в БД
