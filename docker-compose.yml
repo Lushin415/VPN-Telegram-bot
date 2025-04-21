@@ -1,11 +1,16 @@
-version: "3.9"
 services:
   bot:
-    build: .
+    image: vpn-bot
+    #build: .
+          # Используем host network для build, если проблемы с сетью
     container_name: vpn-telegram-bot
     restart: always
-    env_file:
-      - .env
+    environment:
+      BOT_TOKEN:
+      ADMIN_TELEGRAM_ID:
+      YOOKASSA_SHOP_ID: ""
+      YOOKASSA_SECRET_KEY:
+      DATABASE_URL: "postgres://vpnuser:vpnpassword@db:5432/vpn?sslmode=disable"
     volumes:
       - ./backups:/app/backups
       - ./config:/app/config
@@ -39,7 +44,7 @@ services:
     depends_on:
       - db
     entrypoint: >
-      /bin/sh -c "go install github.com/pressly/goose/v3/cmd/goose@latest && goose -dir /migrations postgres \"$DATABASE_URL\" up"
+      /bin/sh -c "go install github.com/pressly/goose/v3/cmd/goose@latest && goose -dir /migrations postgres \"postgres://vpnuser:vpnpassword@db:5432/vpn?sslmode=disable\" up"
     environment:
       - DATABASE_URL=postgres://vpnuser:vpnpassword@db:5432/vpn?sslmode=disable
     networks:

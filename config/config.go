@@ -28,7 +28,11 @@ func LoadConfig() {
 	AppCfg.YooKassaSecret = os.Getenv("YOOKASSA_SECRET_KEY")
 	AppCfg.DatabaseURL = os.Getenv("DATABASE_URL")
 
-	if AppCfg.BotToken == "" || AppCfg.AdminTelegramID == "" || AppCfg.YooKassaShopID == "" || AppCfg.YooKassaSecret == "" || AppCfg.DatabaseURL == "" {
+	// YOOKASSA_SHOP_ID может быть не обязательным, остальные — обязательны
+	if AppCfg.BotToken == "" ||
+		AppCfg.AdminTelegramID == "" ||
+		AppCfg.YooKassaSecret == "" ||
+		AppCfg.DatabaseURL == "" {
 		log.Fatal("Critical environment variables are missing. Bot will exit.")
 	}
 }
