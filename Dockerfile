@@ -14,6 +14,8 @@ COPY ./backups ./backups
 COPY ./USER_GUIDE.md ./USER_GUIDE.md
 COPY ./ADMIN_GUIDE.md ./ADMIN_GUIDE.md
 COPY .env.example ./.env.example
+RUN apk add --no-cache bash
+RUN apk add --no-cache openssh
 ENV TZ=Asia/Shanghai
 EXPOSE 8080
 CMD ["./bot"]

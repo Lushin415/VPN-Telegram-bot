@@ -9,6 +9,7 @@ import (
 	"VPN-Telegram-bot/internal/services"
 	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/robfig/cron/v3"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -23,6 +24,14 @@ func main() {
 		log.Fatalf("Failed to create bot: %v", err)
 	}
 	logger.InitNotifier(botapi, admin.AdminTelegramID)
+	// --- Логирование в файл и консоль ---
+	logFile, err := os.OpenFile("bot.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.Fatalf("Не удалось открыть файл логов: %v", err)
+	}
+	mw := io.MultiWriter(os.Stdout, logFile)
+	log.SetOutput(mw)
+	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 	// Автоматическое обновление статуса серверов
 	c := cron.New()
 	c.AddFunc("@every 1m", services.UpdateAllServerStatuses)
@@ -52,6 +61,16 @@ func main() {
 			log.Fatalf("Webhook server error: %v", err)
 		}
 	}()
-	// Запуск Telegram-бота (VPS)
+	// --- POLLING MODE: Telegram webhook server is DISABLED for testing ---
+	// TODO: Enable for webhook production mode:
+	// go func() {
+	// 	http.HandleFunc("/telegram/webhook", services.TelegramWebhookHandler(botapi))
+	// 	log.Println("Запуск Telegram webhook-сервера на :443 (VPS)")
+	// 	if err := http.ListenAndServeTLS(":443", "cert.pem", "key.pem", nil); err != nil {
+	// 		log.Fatalf("Telegram webhook server error: %v", err)
+	// 	}
+	// }()
+	// -------------------------------------------------------------
+	// Запуск Telegram-бота (polling)
 	bot.StartBotWithInstance(botapi)
 }

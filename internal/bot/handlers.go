@@ -1,9 +1,12 @@
 package bot
 
 import (
+	"VPN-Telegram-bot/config"
 	"VPN-Telegram-bot/internal/admin"
 	"VPN-Telegram-bot/internal/db"
+	"VPN-Telegram-bot/internal/services"
 	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +15,152 @@ import (
 var rateLimiter = NewRateLimiter()
 
 func HandleUpdate(botapi *tgbotapi.BotAPI, update tgbotapi.Update) {
+	// Проверяем и добавляем/обновляем пользователя в БД при любом апдейте
+	if update.Message != nil && update.Message.From != nil {
+		telegramID := strconv.FormatInt(update.Message.From.ID, 10)
+		var user db.User
+		err := db.DB.Where("telegram_id = ?", telegramID).First(&user).Error
+		if err != nil {
+			// Пользователь не найден — создаём
+			user = db.User{TelegramID: telegramID}
+			db.DB.Create(&user)
+		} else {
+			// Пользователь найден — обновляем TelegramID на случай, если что-то изменилось
+			if user.TelegramID != telegramID {
+				db.DB.Model(&user).Update("telegram_id", telegramID)
+			}
+		}
+	}
+
+	if update.CallbackQuery != nil {
+		log.Printf("Received callback_query: %+v", update.CallbackQuery)
+		// Обработка inline-кнопок
+		data := update.CallbackQuery.Data
+		if strings.HasPrefix(data, "buy_server_") {
+			serverIDstr := strings.TrimPrefix(data, "buy_server_")
+			_, err := strconv.ParseInt(serverIDstr, 10, 64)
+			if err != nil {
+				botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Ошибка выбора сервера"))
+				return
+			}
+			// Кнопки выбора тарифа (1, 3, 6, 12 месяцев)
+			var rows [][]tgbotapi.InlineKeyboardButton
+			for _, m := range []int{1, 3, 6, 12} {
+				label := strconv.Itoa(m) + " мес."
+				row := tgbotapi.NewInlineKeyboardRow(
+					tgbotapi.NewInlineKeyboardButtonData(label, "buy_tariff_"+serverIDstr+"_"+strconv.Itoa(m)),
+				)
+				rows = append(rows, row)
+			}
+			keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
+			msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, "Выберите срок подписки:")
+			msg.ReplyMarkup = keyboard
+			botapi.Send(msg)
+			botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Сервер выбран"))
+			return
+		}
+		if strings.HasPrefix(data, "buy_tariff_") {
+			parts := strings.Split(data, "_")
+			if len(parts) != 4 {
+				botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Ошибка выбора тарифа"))
+				return
+			}
+			serverID, err := strconv.ParseInt(parts[2], 10, 64)
+			if err != nil {
+				botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Ошибка выбора тарифа"))
+				return
+			}
+			months, _ := strconv.Atoi(parts[3])
+			userTGID := update.CallbackQuery.From.ID
+			// Найти/создать пользователя по TelegramID
+			var user db.User
+			db.DB.FirstOrCreate(&user, db.User{TelegramID: strconv.FormatInt(userTGID, 10)})
+			// Проверить, что сервер существует и активен
+			var server db.Server
+			err = db.DB.First(&server, serverID).Error
+			if err != nil || !server.IsActive {
+				botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Сервер не найден или неактивен"))
+				return
+			}
+			// Запустить оплату с выбранным сервером
+			url, err := ReserveVLESSKeyAndCreatePayment(user.ID, uint(serverID), months)
+			if err != nil {
+				botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Ошибка: "+err.Error()))
+				return
+			}
+			msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, "Ссылка на оплату: "+url)
+			botapi.Send(msg)
+			botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Платёж создан"))
+			return
+		}
+		if strings.HasPrefix(data, "renew_tariff_") {
+			parts := strings.Split(data, "_")
+			if len(parts) != 4 {
+				botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Ошибка выбора тарифа продления"))
+				return
+			}
+			keyID, _ := strconv.ParseInt(parts[2], 10, 64)
+			months, _ := strconv.Atoi(parts[3])
+			// Найти ключ
+			var key db.VLESSKey
+			db.DB.First(&key, keyID)
+			if key.ID == 0 {
+				botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Подписка не найдена"))
+				return
+			}
+			// Найти пользователя
+			var user db.User
+			db.DB.Where("telegram_id = ?", strconv.FormatInt(update.CallbackQuery.From.ID, 10)).First(&user)
+			if key.UserID == nil || *key.UserID != user.ID {
+				botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Это не ваша подписка"))
+				return
+			}
+			// Найти сервер
+			var server db.Server
+			db.DB.First(&server, key.ServerID)
+			// Рассчитать цену
+			var price int
+			switch months {
+			case 1:
+				price = server.Price1
+			case 3:
+				price = server.Price3
+			case 6:
+				price = server.Price6
+			case 12:
+				price = server.Price12
+			default:
+				botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Некорректный срок продления"))
+				return
+			}
+			// Учесть скидку пользователя
+			if user.CurrentDiscount > 0 {
+				price = price * (100 - user.CurrentDiscount) / 100
+			}
+			// Создать платёж для продления
+			pay := db.Payment{
+				UserID: user.ID,
+				Amount: price,
+				Status: "pending",
+				KeyID:  &key.ID,
+				Months: &months,
+			}
+			db.DB.Create(&pay)
+			// Получить ссылку на оплату
+			paymentID, url, err := ReserveRenewPaymentAndCreateYooKassa(&pay, server, user)
+			if err != nil {
+				botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Ошибка: "+err.Error()))
+				return
+			}
+			db.DB.Model(&pay).Update("yoo_kassa_id", paymentID)
+			msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, "Ссылка на оплату продления: "+url)
+			botapi.Send(msg)
+			botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Платёж на продление создан"))
+			return
+		}
+		return
+	}
+
 	if update.Message == nil {
 		return
 	}
@@ -157,6 +306,28 @@ func HandleUpdate(botapi *tgbotapi.BotAPI, update tgbotapi.Update) {
 			msg.ReplyMarkup = keyboard
 			botapi.Send(msg)
 			return
+		case strings.HasPrefix(update.Message.Text, "/sync_xray_keys"):
+			adminID, err := strconv.ParseInt(config.AppCfg.AdminTelegramID, 10, 64)
+			if err == nil && update.Message != nil && update.Message.From != nil && update.Message.From.ID == adminID {
+				if update.Message.Text == "/sync_xray_keys" {
+					go func() {
+						uuids, err := services.GetAllXrayUUIDsFromRemote("root", "150.241.85.73", "59421", "/root/.ssh/id_ed25519")
+						if err != nil {
+							msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Ошибка получения uuid из config.json: "+err.Error())
+							botapi.Send(msg)
+							return
+						}
+						err = services.CleanDBKeysNotInXray(uuids)
+						if err != nil {
+							msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Ошибка очистки БД: "+err.Error())
+							botapi.Send(msg)
+							return
+						}
+						msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Синхронизация завершена. Удалены все ключи, которых нет в config.json.")
+						botapi.Send(msg)
+					}()
+				}
+			}
 		default:
 			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Неизвестная команда. Используйте /help для списка всех возможностей.")
 			msg.ReplyMarkup = keyboard
@@ -164,130 +335,4 @@ func HandleUpdate(botapi *tgbotapi.BotAPI, update tgbotapi.Update) {
 		}
 	}
 
-	// Обработка inline-кнопок
-	if update.CallbackQuery != nil {
-		data := update.CallbackQuery.Data
-		if strings.HasPrefix(data, "buy_server_") {
-			serverIDstr := strings.TrimPrefix(data, "buy_server_")
-			_, err := strconv.ParseInt(serverIDstr, 10, 64)
-			if err != nil {
-				botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Ошибка выбора сервера"))
-				return
-			}
-			// Кнопки выбора тарифа (1, 3, 6, 12 месяцев)
-			var rows [][]tgbotapi.InlineKeyboardButton
-			for _, m := range []int{1, 3, 6, 12} {
-				label := strconv.Itoa(m) + " мес."
-				row := tgbotapi.NewInlineKeyboardRow(
-					tgbotapi.NewInlineKeyboardButtonData(label, "buy_tariff_"+serverIDstr+"_"+strconv.Itoa(m)),
-				)
-				rows = append(rows, row)
-			}
-			keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
-			msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, "Выберите срок подписки:")
-			msg.ReplyMarkup = keyboard
-			botapi.Send(msg)
-			botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Сервер выбран"))
-			return
-		}
-		if strings.HasPrefix(data, "buy_tariff_") {
-			parts := strings.Split(data, "_")
-			if len(parts) != 4 {
-				botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Ошибка выбора тарифа"))
-				return
-			}
-			serverID, err := strconv.ParseInt(parts[2], 10, 64)
-			if err != nil {
-				botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Ошибка выбора тарифа"))
-				return
-			}
-			months, _ := strconv.Atoi(parts[3])
-			userTGID := update.CallbackQuery.From.ID
-			// Найти/создать пользователя по TelegramID
-			var user db.User
-			db.DB.FirstOrCreate(&user, db.User{TelegramID: strconv.FormatInt(userTGID, 10)})
-			// Проверить, что сервер существует и активен
-			var server db.Server
-			err = db.DB.First(&server, serverID).Error
-			if err != nil || !server.IsActive {
-				botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Сервер не найден или неактивен"))
-				return
-			}
-			// Запустить оплату с выбранным сервером
-			url, err := ReserveVLESSKeyAndCreatePayment(user.ID, uint(serverID), months)
-			if err != nil {
-				botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Ошибка: "+err.Error()))
-				return
-			}
-			msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, "Ссылка на оплату: "+url)
-			botapi.Send(msg)
-			botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Платёж создан"))
-			return
-		}
-		if strings.HasPrefix(data, "renew_tariff_") {
-			parts := strings.Split(data, "_")
-			if len(parts) != 4 {
-				botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Ошибка выбора тарифа продления"))
-				return
-			}
-			keyID, _ := strconv.ParseInt(parts[2], 10, 64)
-			months, _ := strconv.Atoi(parts[3])
-			// Найти ключ
-			var key db.VLESSKey
-			db.DB.First(&key, keyID)
-			if key.ID == 0 {
-				botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Подписка не найдена"))
-				return
-			}
-			// Найти пользователя
-			var user db.User
-			db.DB.Where("telegram_id = ?", strconv.FormatInt(update.CallbackQuery.From.ID, 10)).First(&user)
-			if key.UserID == nil || *key.UserID != user.ID {
-				botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Это не ваша подписка"))
-				return
-			}
-			// Найти сервер
-			var server db.Server
-			db.DB.First(&server, key.ServerID)
-			// Рассчитать цену
-			var price int
-			switch months {
-			case 1:
-				price = server.Price1
-			case 3:
-				price = server.Price3
-			case 6:
-				price = server.Price6
-			case 12:
-				price = server.Price12
-			default:
-				botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Некорректный срок продления"))
-				return
-			}
-			// Учесть скидку пользователя
-			if user.CurrentDiscount > 0 {
-				price = price * (100 - user.CurrentDiscount) / 100
-			}
-			// Создать платёж для продления
-			pay := db.Payment{
-				UserID: user.ID,
-				Amount: price,
-				Status: "pending",
-				KeyID:  &key.ID,
-				Months: &months,
-			}
-			db.DB.Create(&pay)
-			// Получить ссылку на оплату
-			paymentID, url, err := ReserveRenewPaymentAndCreateYooKassa(&pay, server, user)
-			if err != nil {
-				botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Ошибка: "+err.Error()))
-				return
-			}
-			db.DB.Model(&pay).Update("yoo_kassa_id", paymentID)
-			msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, "Ссылка на оплату продления: "+url)
-			botapi.Send(msg)
-			botapi.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "Платёж на продление создан"))
-			return
-		}
-	}
 }

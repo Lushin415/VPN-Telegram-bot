@@ -1,19 +1,20 @@
 services:
   bot:
-    image: vpn-bot
+    image: vpn-telegram-bot
     #build: .
           # Используем host network для build, если проблемы с сетью
     container_name: vpn-telegram-bot
     restart: always
     environment:
       BOT_TOKEN:
-      ADMIN_TELEGRAM_ID:
+      ADMIN_TELEGRAM_ID: 338908929
       YOOKASSA_SHOP_ID: ""
       YOOKASSA_SECRET_KEY:
       DATABASE_URL: "postgres://vpnuser:vpnpassword@db:5432/vpn?sslmode=disable"
     volumes:
       - ./backups:/app/backups
       - ./config:/app/config
+      - /home/alex/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
     depends_on:
       - db
     networks:
@@ -23,7 +24,8 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-
+    ports:
+      - "443:8080"
   db:
     image: postgres:15-alpine
     container_name: vpn-bot-db

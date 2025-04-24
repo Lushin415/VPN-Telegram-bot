@@ -21,7 +21,8 @@ func InitDB() {
 		log.Fatalf("failed to connect database: %v", err)
 	}
 	DB = db
-	db.AutoMigrate(&Server{}, &VLESSKey{}, &Payment{}, &Order{})
+	// Добавлено: миграция таблицы пользователей
+	db.AutoMigrate(&User{}, &Server{}, &VLESSKey{}, &Payment{}, &Order{})
 }
 
 // CreateOrder сохраняет заказ в БД
